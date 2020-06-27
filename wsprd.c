@@ -34,7 +34,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
-#include <fftw3.h>
+
+#include "pffft.h"
 
 #include "fano.h"
 #include "jelinek.h"
@@ -45,11 +46,6 @@
 #define max(x,y) ((x) > (y) ? (x) : (y))
 
 extern void osdwspr_ (float [], unsigned char [], int *, unsigned char [], int *, float *);
-
-// Possible PATIENCE options: FFTW_ESTIMATE, FFTW_ESTIMATE_PATIENT,
-// FFTW_MEASURE, FFTW_PATIENT, FFTW_EXHAUSTIVE
-#define PATIENCE FFTW_ESTIMATE
-fftwf_plan PLAN1,PLAN2,PLAN3;
 
 unsigned char pr3[162]=
 {1,1,0,0,0,0,0,0,1,0,0,0,1,1,1,0,0,0,1,0,
@@ -129,7 +125,8 @@ unsigned long readwavfile(char *ptr_to_infile, int ntrmin, float *idat, float *q
     }
 
     float *realin;
-    fftwf_complex *fftin, *fftout;
+    float *fftin, *fftout;
+    PFFFT_Setup *fftsetup1, *fftsetup2;
 
     FILE *fp;
     short int *buf2;
@@ -145,9 +142,9 @@ unsigned long readwavfile(char *ptr_to_infile, int ntrmin, float *idat, float *q
     fread(buf2,2,npoints,fp); //Read raw data
     fclose(fp);
 
-    realin=(float*) fftwf_malloc(sizeof(float)*nfft1);
-    fftout=(fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex)*(nfft1/2+1));
-    PLAN1 = fftwf_plan_dft_r2c_1d(nfft1, realin, fftout, PATIENCE);
+    realin=pffft_aligned_malloc(sizeof(float)*nfft1);
+    fftout=pffft_aligned_malloc(sizeof(float)*2*(nfft1/2+1));
+    fftsetup1=pffft_new_setup(nfft1, PFFFT_REAL);
 
     for (i=0; i<npoints; i++) {
         realin[i]=buf2[i]/32768.0;
@@ -158,30 +155,33 @@ unsigned long readwavfile(char *ptr_to_infile, int ntrmin, float *idat, float *q
     }
     free(buf2);
 
-    fftwf_execute(PLAN1);
-    fftwf_free(realin);
+    pffft_transform_ordered(fftsetup1, realin, fftout, NULL, PFFFT_FORWARD);
+    pffft_aligned_free(realin);
 
-    fftin=(fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex)*nfft2);
+    fftin=pffft_aligned_malloc(sizeof(float)*2*nfft2);
 
     for (i=0; i<(size_t)nfft2; i++) {
         j=i0+i;
         if( i>(size_t)nh2 ) j=j-nfft2;
-        fftin[i][0]=fftout[j][0];
-        fftin[i][1]=fftout[j][1];
+        fftin[i*2]=fftout[j*2];
+        fftin[i*2+1]=fftout[j*2+1];
     }
 
-    fftwf_free(fftout);
-    fftout=(fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex)*nfft2);
-    PLAN2 = fftwf_plan_dft_1d(nfft2, fftin, fftout, FFTW_BACKWARD, PATIENCE);
-    fftwf_execute(PLAN2);
+    pffft_aligned_free(fftout);
+    fftout=pffft_aligned_malloc(sizeof(float)*2*nfft2);
+    fftsetup2=pffft_new_setup(nfft2, PFFFT_COMPLEX);
+    pffft_transform_ordered(fftsetup2, fftin, fftout, NULL, PFFFT_BACKWARD);
 
     for (i=0; i<(size_t)nfft2; i++) {
-        idat[i]=fftout[i][0]/1000.0;
-        qdat[i]=fftout[i][1]/1000.0;
+        idat[i]=fftout[i*2]/1000.0;
+        qdat[i]=fftout[i*2+1]/1000.0;
     }
 
-    fftwf_free(fftin);
-    fftwf_free(fftout);
+    pffft_aligned_free(fftin);
+    pffft_aligned_free(fftout);
+    pffft_destroy_setup(fftsetup1);
+    pffft_destroy_setup(fftsetup2);
+
     return nfft2;
 }
 
@@ -713,7 +713,7 @@ int main(int argc, char *argv[])
     char *callsign, *call_loc_pow;
     char *ptr_to_infile,*ptr_to_infile_suffix;
     char *data_dir=NULL;
-    char wisdom_fname[200],all_fname[200],spots_fname[200];
+    char all_fname[200],spots_fname[200];
     char timer_fname[200],hash_fname[200];
     char uttime[5],date[7];
     int c,delta,maxpts=65536,verbose=0,quickmode=0,more_candidates=0, stackdecoder=0;
@@ -778,7 +778,9 @@ int main(int argc, char *argv[])
     float bias=0.45;                        //Fano metric bias (used for both Fano and stack algorithms)
 
     t00=clock();
-    fftwf_complex *fftin, *fftout;
+    float *fftin, *fftout;
+    PFFFT_Setup *fftsetup;
+    int fftmap[512];
 #include "./metric_tables.c"
 
     int mettab[2][256];
@@ -862,28 +864,21 @@ int main(int argc, char *argv[])
         mettab[1][i]=round( 10*(metric_tables[2][255-i]-bias) );
     }
 
-    FILE *fp_fftwf_wisdom_file, *fall_wspr, *fwsprd, *fhash, *ftimer;
-    strcpy(wisdom_fname,".");
+    FILE *fall_wspr, *fwsprd, *fhash, *ftimer;
     strcpy(all_fname,".");
     strcpy(spots_fname,".");
     strcpy(timer_fname,".");
     strcpy(hash_fname,".");
     if(data_dir != NULL) {
-        strcpy(wisdom_fname,data_dir);
         strcpy(all_fname,data_dir);
         strcpy(spots_fname,data_dir);
         strcpy(timer_fname,data_dir);
         strcpy(hash_fname,data_dir);
     }
-    strncat(wisdom_fname,"/wspr_wisdom.dat",20);
     strncat(all_fname,"/ALL_WSPR.TXT",20);
     strncat(spots_fname,"/wspr_spots.txt",20);
     strncat(timer_fname,"/wspr_timer.out",20);
     strncat(hash_fname,"/hashtable.txt",20);
-    if ((fp_fftwf_wisdom_file = fopen(wisdom_fname, "r"))) {  //Open FFTW wisdom
-        fftwf_import_wisdom_from_file(fp_fftwf_wisdom_file);
-        fclose(fp_fftwf_wisdom_file);
-    }
 
     fall_wspr=fopen(all_fname,"a");
     fwsprd=fopen(spots_fname,"w");
@@ -930,9 +925,15 @@ int main(int argc, char *argv[])
 
     // Do windowed ffts over 2 symbols, stepped by half symbols
     int nffts=4*floor(npoints/512)-1;
-    fftin=(fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex)*512);
-    fftout=(fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex)*512);
-    PLAN3 = fftwf_plan_dft_1d(512, fftin, fftout, FFTW_FORWARD, PATIENCE);
+    fftin=pffft_aligned_malloc(sizeof(float)*2*512);
+    fftout=pffft_aligned_malloc(sizeof(float)*2*512);
+    fftsetup=pffft_new_setup(512, PFFFT_COMPLEX);
+
+    j = 0;
+    for(i = 0; i < 1024; ++i) fftin[i] = i;
+    pffft_zreorder(fftsetup, fftin, fftout, PFFFT_FORWARD);
+    for(i = 512; i < 1024; i += 2) fftmap[j++] = fftout[i];
+    for(i = 0; i < 512; i += 2) fftmap[j++] = fftout[i];
 
     float ps[512][nffts];
     float w[512];
@@ -976,15 +977,13 @@ int main(int argc, char *argv[])
         for (i=0; i<nffts; i++) {
             for(j=0; j<512; j++ ) {
                 k=i*128+j;
-                fftin[j][0]=idat[k] * w[j];
-                fftin[j][1]=qdat[k] * w[j];
+                fftin[j*2]=idat[k] * w[j];
+                fftin[j*2+1]=qdat[k] * w[j];
             }
-            fftwf_execute(PLAN3);
+            pffft_transform(fftsetup, fftin, fftout, NULL, PFFFT_FORWARD);
             for (j=0; j<512; j++ ) {
-                k=j+256;
-                if( k>511 )
-                    k=k-512;
-                ps[j][i]=fftout[k][0]*fftout[k][0]+fftout[k][1]*fftout[k][1];
+                k=fftmap[j];
+                ps[j][i]=fftout[k]*fftout[k]+fftout[k+4]*fftout[k+4];
             }
         }
 
@@ -1445,13 +1444,9 @@ int main(int argc, char *argv[])
     }
     printf("<DecodeFinished>\n");
 
-    fftwf_free(fftin);
-    fftwf_free(fftout);
-
-    if ((fp_fftwf_wisdom_file = fopen(wisdom_fname, "w"))) {
-        fftwf_export_wisdom_to_file(fp_fftwf_wisdom_file);
-        fclose(fp_fftwf_wisdom_file);
-    }
+    pffft_aligned_free(fftin);
+    pffft_aligned_free(fftout);
+    pffft_destroy_setup(fftsetup);
 
     ttotal += (float)(clock()-t00)/CLOCKS_PER_SEC;
 
@@ -1474,9 +1469,6 @@ int main(int argc, char *argv[])
     fclose(fwsprd);
     //  fclose(fdiag);
     fclose(ftimer);
-    fftwf_destroy_plan(PLAN1);
-    fftwf_destroy_plan(PLAN2);
-    fftwf_destroy_plan(PLAN3);
 
     if( usehashtable ) {
         fhash=fopen(hash_fname,"w");
