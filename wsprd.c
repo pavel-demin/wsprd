@@ -43,6 +43,9 @@
 #include "wsprsim_utils.h"
 
 #define max(x,y) ((x) > (y) ? (x) : (y))
+
+extern void osdwspr_ (float [], unsigned char [], int *, unsigned char [], int *, float *);
+
 // Possible PATIENCE options: FFTW_ESTIMATE, FFTW_ESTIMATE_PATIENT,
 // FFTW_MEASURE, FFTW_PATIENT, FFTW_EXHAUSTIVE
 #define PATIENCE FFTW_ESTIMATE
@@ -59,8 +62,6 @@ unsigned char pr3[162]=
     0,0,0,0,0,0,0,1,1,0,1,0,1,1,0,0,0,1,1,0,
     0,0};
 
-unsigned long nr;
-
 int printdata=0;
 
 //***************************************************************************
@@ -73,18 +74,18 @@ unsigned long readc2file(char *ptr_to_infile, float *idat, float *qdat,
     char *c2file[15];
     FILE* fp;
 
-    buffer=calloc(2*65536,sizeof(float));
-
     fp = fopen(ptr_to_infile,"rb");
     if (fp == NULL) {
         fprintf(stderr, "Cannot open data file '%s'\n", ptr_to_infile);
         return 1;
     }
-    unsigned long nread=fread(c2file,sizeof(char),14,fp);
-    nread=fread(&ntrmin,sizeof(int),1,fp);
-    nread=fread(&dfreq,sizeof(double),1,fp);
+    fread(c2file,sizeof(char),14,fp);
+    fread(&ntrmin,sizeof(int),1,fp);
+    fread(&dfreq,sizeof(double),1,fp);
     *freq=dfreq;
-    nread=fread(buffer,sizeof(float),2*45000,fp);
+
+    buffer=calloc(2*65536,sizeof(float));
+    unsigned long nread=fread(buffer,sizeof(float),2*45000,fp);
     fclose(fp);
 
     *wspr_type=ntrmin;
@@ -93,13 +94,13 @@ unsigned long readc2file(char *ptr_to_infile, float *idat, float *qdat,
         idat[i]=buffer[2*i];
         qdat[i]=-buffer[2*i+1];
     }
+    free(buffer);
 
     if( nread == 2*45000 ) {
         return nread/2;
     } else {
         return 1;
     }
-    free(buffer);
 }
 
 //***************************************************************************
@@ -132,15 +133,16 @@ unsigned long readwavfile(char *ptr_to_infile, int ntrmin, float *idat, float *q
 
     FILE *fp;
     short int *buf2;
-    buf2 = calloc(npoints,sizeof(short int));
 
     fp = fopen(ptr_to_infile,"rb");
     if (fp == NULL) {
         fprintf(stderr, "Cannot open data file '%s'\n", ptr_to_infile);
         return 1;
     }
-    nr=fread(buf2,2,22,fp);            //Read and ignore header
-    nr=fread(buf2,2,npoints,fp);       //Read raw data
+
+    buf2 = calloc(npoints,sizeof(short int));
+    fread(buf2,2,22,fp);      //Read and ignore header
+    fread(buf2,2,npoints,fp); //Read raw data
     fclose(fp);
 
     realin=(float*) fftwf_malloc(sizeof(float)*nfft1);
@@ -154,8 +156,8 @@ unsigned long readwavfile(char *ptr_to_infile, int ntrmin, float *idat, float *q
     for (i=npoints; i<(size_t)nfft1; i++) {
         realin[i]=0.0;
     }
-
     free(buf2);
+
     fftwf_execute(PLAN1);
     fftwf_free(realin);
 
@@ -648,30 +650,27 @@ unsigned long writec2file(char *c2filename, int trmin, double freq
 {
     int i;
     float *buffer;
-    buffer=calloc(2*45000,sizeof(float));
-
     FILE *fp;
 
     fp = fopen(c2filename,"wb");
     if( fp == NULL ) {
         fprintf(stderr, "Could not open c2 file '%s'\n", c2filename);
-        free(buffer);
         return 0;
     }
     unsigned long nwrite = fwrite(c2filename,sizeof(char),14,fp);
     nwrite = fwrite(&trmin, sizeof(int), 1, fp);
     nwrite = fwrite(&freq, sizeof(double), 1, fp);
 
+    buffer=calloc(2*45000,sizeof(float));
     for(i=0; i<45000; i++) {
         buffer[2*i]=idat[i];
         buffer[2*i+1]=-qdat[i];
     }
-
     nwrite = fwrite(buffer, sizeof(float), 2*45000, fp);
+    free(buffer);
     if( nwrite == 2*45000 ) {
         return nwrite;
     } else {
-        free(buffer);
         return 0;
     }
 }
@@ -693,6 +692,7 @@ void usage(void)
     printf("       -H do not use (or update) the hash table\n");
     printf("       -J use the stack decoder instead of Fano decoder\n");
     printf("       -m decode wspr-15 .wav file\n");
+    printf("       -o n (0<=n<=5), decoding depth for OSD, default is disabled\n");
     printf("       -q quick mode - doesn't dig deep for weak signals\n");
     printf("       -s single pass mode, no subtraction (same as original wsprd)\n");
     printf("       -v verbose mode (shows dupes)\n");
@@ -708,7 +708,7 @@ int main(int argc, char *argv[])
     extern char *optarg;
     extern int optind;
     int i,j,k;
-    unsigned char *symbols, *decdata, *channel_symbols;
+    unsigned char *symbols, *decdata, *channel_symbols, *apmask, *cw;
     signed char message[]={-9,13,-35,123,57,-39,64,0,0,0,0};
     char *callsign, *call_loc_pow;
     char *ptr_to_infile,*ptr_to_infile_suffix;
@@ -718,18 +718,21 @@ int main(int argc, char *argv[])
     char uttime[5],date[7];
     int c,delta,maxpts=65536,verbose=0,quickmode=0,more_candidates=0, stackdecoder=0;
     int writenoise=0,usehashtable=1,wspr_type=2, ipass, nblocksize;
+    int nhardmin,ihash;
     int writec2=0,maxdrift;
     int shift1, lagmin, lagmax, lagstep, ifmin, ifmax, worth_a_try, not_decoded;
     unsigned int nbits=81, stacksize=200000;
     unsigned int npoints, metric, cycles, maxnp;
     float df=375.0/256.0/2;
     float freq0[200],snr0[200],drift0[200],sync0[200];
+    float fsymbs[162];
     int shift0[200];
     float dt=1.0/375.0, dt_print;
     double dialfreq_cmdline=0.0, dialfreq, freq_print;
     double dialfreq_error=0.0;
     float fmin=-110, fmax=110;
     float f1, fstep, sync1, drift1;
+    float dmin;
     float psavg[512];
     float *idat, *qdat;
     clock_t t0,t00;
@@ -738,15 +741,18 @@ int main(int argc, char *argv[])
 
     struct result { char date[7]; char time[5]; float sync; float snr;
                     float dt; double freq; char message[23]; float drift;
-                    unsigned int cycles; int jitter; int blocksize; unsigned int metric; };
+                    unsigned int cycles; int jitter; int blocksize; unsigned int metric;
+                    unsigned char osd_decode; };
     struct result decodes[50];
 
     char *hashtab;
     hashtab=calloc(32768*13,sizeof(char));
     int nh;
-    symbols=calloc(nbits*2,sizeof(char));
-    decdata=calloc(11,sizeof(char));
-    channel_symbols=calloc(nbits*2,sizeof(char));
+    symbols=calloc(nbits*2,sizeof(unsigned char));
+    apmask=calloc(162,sizeof(unsigned char));
+    cw=calloc(162,sizeof(unsigned char));
+    decdata=calloc(11,sizeof(unsigned char));
+    channel_symbols=calloc(nbits*2,sizeof(unsigned char));
     callsign=calloc(13,sizeof(char));
     call_loc_pow=calloc(23,sizeof(char));
     float allfreqs[100];
@@ -765,6 +771,7 @@ int main(int argc, char *argv[])
     int block_demod=1;                       //Default is to use block demod on pass 2
     int subtraction=1;
     int npasses=2;
+    int ndepth=-1;                            //Depth for OSD
 
     float minrms=52.0 * (symfac/64.0);      //Final test for plausible decoding
     delta=60;                                //Fano threshold step
@@ -779,7 +786,7 @@ int main(int argc, char *argv[])
     idat=calloc(maxpts,sizeof(float));
     qdat=calloc(maxpts,sizeof(float));
 
-    while ( (c = getopt(argc, argv, "a:BcC:de:f:HJmqstwvz:")) !=-1 ) {
+    while ( (c = getopt(argc, argv, "a:BcC:de:f:HJmo:qstwvz:")) !=-1 ) {
         switch (c) {
             case 'a':
                 data_dir = optarg;
@@ -811,6 +818,9 @@ int main(int argc, char *argv[])
                 break;
             case 'm':  //15-minute wspr mode
                 wspr_type = 15;
+                break;
+            case 'o':  //use ordered-statistics-decoder
+                ndepth=(int) strtol(optarg,NULL,10);
                 break;
             case 'q':  //no shift jittering
                 quickmode = 1;
@@ -881,10 +891,10 @@ int main(int argc, char *argv[])
     //  fdiag=fopen("wsprd_diag","a");
 
     if((ftimer=fopen(timer_fname,"r"))) {
-        //Accumulate timing data
-        nr=fscanf(ftimer,"%f %f %f %f %f %f %f",
-                  &treadwav,&tcandidates,&tsync0,&tsync1,&tsync2,&tfano,&ttotal);
-        fclose(ftimer);
+       //Accumulate timing data
+       fscanf(ftimer,"%f %f %f %f %f %f %f",
+              &treadwav,&tcandidates,&tsync0,&tsync1,&tsync2,&tfano,&ttotal);
+       fclose(ftimer);
     }
     ftimer=fopen(timer_fname,"w");
 
@@ -1242,7 +1252,9 @@ int main(int argc, char *argv[])
             int idt, ii, jittered_shift;
             float y,sq,rms;
             not_decoded=1;
+            int osd_decode=0;
             int ib=1, blocksize;
+            int n1,n2,n3,nadd,nu,ntype;
             while( ib <= nblocksize && not_decoded ) {
                 blocksize=ib;
                 idt=0; ii=0;
@@ -1278,6 +1290,45 @@ int main(int argc, char *argv[])
                         }
 
                         tfano += (float)(clock()-t0)/CLOCKS_PER_SEC;
+
+                        if( (ndepth >= 0) && not_decoded ) {
+                            for(i=0; i<162; i++) {
+                                fsymbs[i]=symbols[i]-127;
+                            }
+                            osdwspr_(fsymbs,apmask,&ndepth,cw,&nhardmin,&dmin);
+                            for(i=0; i<162; i++) {
+                               symbols[i]=255*cw[i];
+                            }
+                            fano(&metric,&cycles,&maxnp,decdata,symbols,nbits,
+                                               mettab,delta,maxcycles);
+                            for(i=0; i<11; i++) {
+                                if( decdata[i]>127 ) {
+                                    message[i]=decdata[i]-256;
+                                } else {
+                                    message[i]=decdata[i];
+                                }
+                            }
+                            unpack50(message,&n1,&n2);
+                            if( !unpackcall(n1,callsign) ) break;
+                            callsign[12]=0;
+                            ntype = (n2&127) - 64;
+                            if( (ntype >= 0) && (ntype <= 62) ) {
+                                nu = ntype%10;
+                                if( !(nu == 0 || nu == 3 || nu == 7) ) {
+                                   nadd=nu;
+                                   if( nu > 3 ) nadd=nu-3;
+                                   if( nu > 7 ) nadd=nu-7;
+                                   n3=n2/128+32768*(nadd-1);
+                                   if( !unpackpfx(n3,callsign) ) break;
+                                }
+                                ihash=nhash(callsign,strlen(callsign),(uint32_t)146);
+                                if(strncmp(hashtab+ihash*13,callsign,13)==0) {
+                                   not_decoded=0;
+                                   osd_decode =1;
+                                   break;
+                                }
+                            }
+                        }
 
                     }
                     idt++;
@@ -1347,6 +1398,7 @@ int main(int argc, char *argv[])
                     decodes[uniques-1].jitter=ii;
                     decodes[uniques-1].blocksize=blocksize;
                     decodes[uniques-1].metric=metric;
+                    decodes[uniques-1].osd_decode=osd_decode;
                 }
             }
         }
@@ -1378,11 +1430,11 @@ int main(int argc, char *argv[])
                decodes[i].time, decodes[i].snr,decodes[i].dt, decodes[i].freq,
                (int)decodes[i].drift, decodes[i].message);
         fprintf(fall_wspr,
-                "%6s %4s %3d %3.0f %5.2f %11.7f  %-22s %2d %5u %4d %4d %4d\n",
+                "%6s %4s %3d %3.0f %5.2f %11.7f  %-22s %2d %5u %4d %4d %4d %2u\n",
                 decodes[i].date, decodes[i].time, (int)(10*decodes[i].sync),
                 decodes[i].snr, decodes[i].dt, decodes[i].freq,
                 decodes[i].message, (int)decodes[i].drift, decodes[i].cycles/81,
-                decodes[i].jitter,decodes[i].blocksize,decodes[i].metric);
+                decodes[i].jitter,decodes[i].blocksize,decodes[i].metric,decodes[i].osd_decode);
         fprintf(fwsprd,
                 "%6s %4s %3d %3.0f %4.1f %10.6f  %-22s %2d %5u %4d\n",
                 decodes[i].date, decodes[i].time, (int)(10*decodes[i].sync),
