@@ -7,3 +7,7 @@ The original sources can be found at:
 A brief description of the WSPR protocol can be found at:
 
   http://physics.princeton.edu/pulsar/K1JT/doc/wspr/wspr-main.html#PROTOCOL
+
+This WSPR decoder is mainly used with the WSPR application for the Red Pitaya board:
+
+  http://pavel-demin.github.io/red-pitaya-notes/sdr-transceiver-wspr
