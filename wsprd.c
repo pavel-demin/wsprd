@@ -142,8 +142,8 @@ unsigned long readwavfile(char *ptr_to_infile, int ntrmin, float *idat, float *q
     fread(buf2,2,npoints,fp); //Read raw data
     fclose(fp);
 
-    realin=pffft_aligned_malloc(sizeof(float)*nfft1);
-    fftout=pffft_aligned_malloc(sizeof(float)*2*(nfft1/2+1));
+    realin=pffft_aligned_malloc(sizeof(float)*2*(nfft1/2+1));
+    fftout=realin;
     fftsetup1=pffft_new_setup(nfft1, PFFFT_REAL);
 
     for (i=0; i<npoints; i++) {
@@ -155,8 +155,7 @@ unsigned long readwavfile(char *ptr_to_infile, int ntrmin, float *idat, float *q
     }
     free(buf2);
 
-    pffft_transform_ordered(fftsetup1, realin, fftout, NULL, PFFFT_FORWARD);
-    pffft_aligned_free(realin);
+    pffft_transform_ordered(fftsetup1, realin, realin, NULL, PFFFT_FORWARD);
 
     fftin=pffft_aligned_malloc(sizeof(float)*2*nfft2);
 
@@ -1482,6 +1481,8 @@ int main(int argc, char *argv[])
     }
 
     free(hashtab);
+    free(cw);
+    free(apmask);
     free(symbols);
     free(decdata);
     free(channel_symbols);
