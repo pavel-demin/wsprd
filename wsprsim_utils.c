@@ -162,7 +162,7 @@ void interleave(unsigned char *sym)
     }
 }
 
-int get_wspr_channel_symbols(char* rawmessage, char* hashtab, char* loctab, unsigned char* symbols) {
+int get_wspr_channel_symbols(const char* rawmessage, char* hashtab, char* loctab, unsigned char* symbols) {
     int m=0, ntype=0;
     long unsigned int n=0;
     int i, j, ihash;
